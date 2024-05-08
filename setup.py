@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='pycanpcap',
-    version='0.1',
+    version='0.2',
     packages=find_packages(),
     description='candump and write a pcap using scapy (and python-can)',
     install_requires=['scapy >= 2.4.5', 'python-can~=4.3.1'],
