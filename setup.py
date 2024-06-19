@@ -5,7 +5,7 @@ setup(
     version='0.2',
     packages=find_packages(),
     description='candump and write a pcap using scapy (and python-can)',
-    install_requires=['scapy >= 2.4.5', 'python-can~=4.3.1'],
+    install_requires=['scapy >= 2.4.5', 'python-can>=4.3.1'],
     long_description=open('README.md').read(),
     long_description_content_type="text/markdown",
     url='https://github.com/BenGardiner/pycanpcap',
