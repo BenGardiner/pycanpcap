@@ -1,15 +1,16 @@
 import argparse
+import gzip
+import os
 import re
 import sys
-import signal
-import threading
-import time
 from ast import literal_eval
 
-import can
-
 from scapy.config import conf
-from scapy.layers.can import CandumpReader
+from scapy.layers.can import CandumpReader, CAN
+from scapy.plist import PacketList
+
+PYTHON_CAN_LOGGER_FORMAT_PATTERN = (r"^Timestamp:\s+(\d+\.\d+)\s+ID:\s+([0-9a-fA-F]+)\s+(X\s+)?(Rx|Tx)\s+DL:\s+(["
+                                    r"0-8])\s+([0-9a-fA-F\s]*)$")
 
 try:
     import scapy.libs.six as six
@@ -23,14 +24,10 @@ from scapy.consts import LINUX
 if not LINUX or conf.use_pypy:
     conf.contribs["CANSocket"] = {"use-python-can": True}
 
-from scapy.scapypipes import WiresharkSink, WrpcapSink, SniffSource
-from scapy.sendrecv import sniff, AsyncSniffer
+from scapy.scapypipes import WrpcapSink
+from scapy.sendrecv import sniff
 from scapy.contrib.cansocket import CANSocket, PYTHON_CAN  # noqa: E402
-from scapy.contrib.isotp import ISOTPSocket
-
-from scapy.contrib.automotive.uds import UDS
-
-from scapy.pipetool import CLIFeeder, ConsoleSink, PipeEngine, Sink
+from scapy.pipetool import CLIFeeder, PipeEngine, Sink
 
 
 def create_socket(python_can_args, interface, channel, bitrate):
@@ -69,6 +66,121 @@ def sanitize_string(input_string):
     s = re.sub("_+", "_", s)  # replace multiple underscores with a single one
     s = re.sub("_+$", "", s)  # remove trailing underscores
     return s
+
+
+def is_python_can_logger_format(file):
+    try:
+        with open(file, 'r') as file:
+            first_line = file.readline()
+            return first_line.startswith('Timestamp:')
+
+    except FileNotFoundError:
+        return False
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return False
+
+
+class PythonCanLoggerReader:
+    nonblocking_socket = True
+
+    def __init__(self, filename, interface=None):
+        self.filename, self.f = self.open(filename)
+        self.ifilter = None
+        if interface is not None:
+            if isinstance(interface, str):
+                self.ifilter = [interface]
+            else:
+                self.ifilter = interface
+
+    def __iter__(self):
+        return self
+
+    @staticmethod
+    def open(filename):
+        if isinstance(filename, str):
+            try:
+                fdesc = gzip.open(filename, "rb")
+                fdesc.read(1)
+                fdesc.seek(0)
+            except IOError:
+                fdesc = open(filename, "rb")
+            return filename, fdesc
+        else:
+            name = getattr(filename, "name", "No name")
+            return name, filename
+
+    def next(self):
+        try:
+            pkt = None
+            while pkt is None:
+                pkt = self.read_packet()
+        except EOFError:
+            raise StopIteration
+
+        return pkt
+
+    __next__ = next
+
+    def read_packet(self, size=0):
+        line = self.f.readline().decode('ASCII').strip()
+
+        if not line or len(line) == 0:
+            raise EOFError
+
+        match = re.match(PYTHON_CAN_LOGGER_FORMAT_PATTERN, line)
+        if not match:
+            return None
+
+        t, idn, extended_flag, _, dl, data_str = match.groups()
+        idn = int(idn, 16)
+        data_bytes = bytearray.fromhex(data_str.replace(' ', '')) if data_str else bytearray()
+        is_extended = bool(extended_flag)
+
+        pkt = CAN(identifier=idn, data=data_bytes, flags='extended' if is_extended else '')
+
+        return pkt
+
+    def dispatch(self, callback):
+        for p in self:
+            callback(p)
+
+    def read_all(self, count=-1):
+        res = []
+        while count != 0:
+            try:
+                p = self.read_packet()
+                if p is None:
+                    continue
+            except EOFError:
+                break
+            count -= 1
+            res.append(p)
+        return PacketList(res, name=os.path.basename(self.filename))
+
+    def recv(self, size=0):
+        return self.read_packet()
+
+    def fileno(self):
+        return self.f.fileno()
+
+    @property
+    def closed(self):
+        return self.f.closed
+
+    def close(self):
+        return self.f.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, tracback):
+        self.close()
+
+    @staticmethod
+    def select(sockets, remain=None):
+        return [s for s in sockets if isinstance(s, PythonCanLoggerReader) and
+                not s.closed]
 
 
 def main():
@@ -113,7 +225,7 @@ def main():
         "-w", "--write", type=str, required=False, help="Output pcap file"
     )
     parser.add_argument(
-        "-q", "--silent", type=bool, required=False, default=False, help="Silent mode"
+        "-q", "--silent", action="store_true", default=False, help="Silent mode"
     )
     parser.add_argument(
         "-f", "--file", type=str, required=False, help="read from a candump instead"
@@ -122,7 +234,11 @@ def main():
     args = parser.parse_args()
 
     if args.file is not None:
-        sock = CandumpReader(args.file)
+        if is_python_can_logger_format(args.file):
+            sock = PythonCanLoggerReader(args.file)
+        else:
+            sock = CandumpReader(args.file)
+
         interface_string = "log"
     else:
         sock, interface_string = create_socket(
@@ -133,9 +249,11 @@ def main():
 
     class PrintSink(Sink):
         def push(self, pkt):
-            print(
-                f"({pkt.time:010.06f}) {pretty_iface_name} {pkt.identifier:03x}#{pkt.data.hex()}"
-            )
+            if not pkt.flags or "extended" not in pkt.flags:  # Check for standard frame
+                print(f"({pkt.time:010.06f}) {pretty_iface_name} {pkt.identifier:03x}#{pkt.data.hex()}")
+            else:  # Extended frame
+                print(f"({pkt.time:010.06f}) {pretty_iface_name} {pkt.identifier:08x}#{pkt.data.hex()}")
+
             return
 
         def high_push(self, msg):
@@ -153,25 +271,20 @@ def main():
     p = PipeEngine(feeder)
     p.start()
 
-    def just_feed(p):
+    def just_feed(pkt):
         nonlocal packet_count
         if not args.silent:
-            feeder.send(p)
+            feeder.send(pkt)
         packet_count = packet_count + 1
         return
     sniff(opened_socket=sock, prn=just_feed, store=0)
 
     sock.close()
-    ## scapy / python-can BUG WORKAROUND: the end of the `with` block above .close()es the `csock2` which also deletes and
-    # closes the underlying python-can interface. If we don't monkey-patch the `low_csock.closed` then the result will be a
-    # deep stacktrace while python is shutting down later
-    sock.closed = True
-    sock.can_iface._is_shutdown = True
-
     p.stop()
     p.wait_and_stop()
 
     sys.stderr.write("processed %d packets\n" % packet_count)
+
 
 if __name__ == "__main__":
     main()
