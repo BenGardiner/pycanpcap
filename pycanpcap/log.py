@@ -3,6 +3,7 @@ import gzip
 import os
 import re
 import sys
+import time
 from ast import literal_eval
 
 from scapy.config import conf
@@ -261,6 +262,7 @@ def main():
 
     packet_count = 0
     feeder = CLIFeeder()
+    wire = None
     if not args.silent:
         printer = PrintSink()
         feeder > printer
@@ -273,15 +275,18 @@ def main():
 
     def just_feed(pkt):
         nonlocal packet_count
-        if not args.silent:
-            feeder.send(pkt)
+        feeder.send(pkt)
         packet_count = packet_count + 1
         return
     sniff(opened_socket=sock, prn=just_feed, store=0)
+    time.sleep(1.337)  # need to give PipeEngine time to write all packets out.
+    feeder.close()
 
     sock.close()
-    p.stop()
-    p.wait_and_stop()
+    if wire:
+        wire.f.flush()
+    if p.thread.is_alive():
+        p.stop()
 
     sys.stderr.write("processed %d packets\n" % packet_count)
 
