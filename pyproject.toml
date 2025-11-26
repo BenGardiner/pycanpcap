@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=78.1.1", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pycanpcap"
+version = "0.3"
+description = "candump and write a pcap using scapy (and python-can)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT License"}
+authors = [
+  {name = "Ben Gardiner", email = "ben.l.gardiner@gmail.com"}
+]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.9",
+]
+dependencies = [
+    "scapy >= 2.4.5",
+    "python-can>=4.3.1"
+]
+
+[project.urls]
+Repository = "https://github.com/BenGardiner/pycanpcap"
+
+[tool.setuptools.packages.find]
+where = ["."]

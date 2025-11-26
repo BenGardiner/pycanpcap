@@ -1,5 +1,7 @@
 candump and write a pcap using scapy (and python-can)
 
+NOTE: you probably don't need this tool. If you just want to use wireshark to open a candump log file you can do that directly inside wireshark in the newest versions. 
+
 ```cmd.exe
  > python -m pip install pycanpcap
  > python -m pycanpcap.log -i cantact -c 0 -w can.pcap
